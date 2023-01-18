@@ -2,9 +2,10 @@ module redhedge.net/schedueler
 
 go 1.19
 
-require (
-	github.com/jasonlvhit/gocron v0.0.1
-	github.com/joho/godotenv v1.4.0
-)
+require github.com/joho/godotenv v1.4.0
 
-require github.com/globalsign/mgo v0.0.0-20181015135952-eeefdecb41b8 // indirect
+require (
+	github.com/go-co-op/gocron v1.18.0 // indirect
+	github.com/robfig/cron/v3 v3.0.1 // indirect
+	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c // indirect
+)
