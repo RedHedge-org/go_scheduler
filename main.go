@@ -162,17 +162,31 @@ func executeDag(dag Dag) {
 				break
 			}
 		}
+		if taskExecution.Status == "failed" {
+			fmt.Println("Task failed: ", task.Name)
+			fmt.Println("Error: ", taskExecution.Error)
+			break
+		}
 	}
 
 }
 
 func main() {
 	fmt.Println("Starting scheduler")
-	s := gocron.NewScheduler(time.UTC)
+	master := gocron.NewScheduler(time.UTC)
+	scheduler := gocron.NewScheduler(time.UTC)
 	schedule := getScheduleFromDB()
 	for _, dag := range schedule {
-		s.CronWithSeconds(dag.Cron).Do(executeDag, dag)
+		scheduler.CronWithSeconds(dag.Cron).Do(executeDag, dag)
 	}
-	s.StartAsync()
-	s.StartBlocking()
+	master.Every(1).Seconds().Do(func() {
+		scheduler.Clear()
+		schedule = getScheduleFromDB()
+		for _, dag := range schedule {
+			scheduler.CronWithSeconds(dag.Cron).Do(executeDag, dag)
+		}
+	})
+	master.StartAsync()
+	scheduler.StartAsync()
+	master.StartBlocking()
 }
