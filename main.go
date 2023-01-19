@@ -14,19 +14,22 @@ import (
 	"github.com/joho/godotenv"
 )
 
+const MAX_TASK_EXECUTION_RETRIES = 10
+
 type Task struct {
 	Uuid           string `json:"uuid"`
 	Name           string `json:"name"`
 	Endpoint       string `json:"endpoint"`
-	RetryOnFailure bool   `json:"retryOnFailure"`
-	MaxRetries     int    `json:"maxRetries"`
+	RetryOnFailure bool   `json:"retry_on_failure"`
+	MaxRetries     int    `json:"max_retries"`
 }
 
 type Dag struct {
-	Uuid  string `json:"uuid"`
-	Name  string `json:"name"`
-	Cron  string `json:"cron"`
-	Tasks []Task `json:"tasks"`
+	Uuid    string `json:"uuid"`
+	Name    string `json:"name"`
+	Cron    string `json:"cron"`
+	Tasks   []Task `json:"tasks"`
+	Enabled bool   `json:"enabled"`
 }
 
 type TaskExecution struct {
@@ -42,14 +45,77 @@ type TaskExecution struct {
 }
 
 type DagExecution struct {
-	Uuid                     string
-	Name                     string
-	DagUuid                  string
-	Status                   string
-	FailingTaskExecutionUuid string
-	TaskExecutions           []TaskExecution
-	Start                    time.Time
-	End                      time.Time
+	Uuid                     string          `json:"uuid"`
+	Name                     string          `json:"name"`
+	DagUuid                  string          `json:"dag_uuid"`
+	Status                   string          `json:"status"`
+	FailingTaskExecutionUuid string          `json:"failing_task_execution_uuid"`
+	TaskExecutions           []TaskExecution `json:"task_executions"`
+	Start                    time.Time       `json:"start"`
+	End                      time.Time       `json:"end"`
+}
+
+func taskExecutionToJson(taskExecution TaskExecution) string {
+	json, err := json.Marshal(taskExecution)
+	if err != nil {
+		panic(err)
+	}
+	return string(json)
+}
+
+func dagExecutionToJson(dagExecution DagExecution) string {
+	json, err := json.Marshal(dagExecution)
+	if err != nil {
+		panic(err)
+	}
+	return string(json)
+}
+
+func scheduleToJson(schedule []Dag) string {
+	json, err := json.Marshal(schedule)
+	if err != nil {
+		panic(err)
+	}
+	return string(json)
+}
+
+func jsonToSchedule(body []byte) (array []Dag) {
+	var schedule []Dag
+	err := json.Unmarshal(body, &schedule)
+	if err != nil {
+		panic(err)
+	}
+	return schedule
+}
+
+func getNewTaskExecution(dag Dag, task Task) (taskExecution TaskExecution) {
+	taskExecution = TaskExecution{
+		Uuid:     uuid.New().String(),
+		Name:     task.Name,
+		DagUuid:  dag.Uuid,
+		TaskUuid: task.Uuid,
+		Attempts: 0,
+		Status:   "running",
+		Start:    time.Now(),
+		End:      time.Now(),
+		Error:    "",
+	}
+	return taskExecution
+}
+
+func getNewDagExecution(dag Dag) (dagExecution DagExecution) {
+	dagExecution = DagExecution{
+		Uuid:                     uuid.New().String(),
+		Name:                     dag.Name,
+		DagUuid:                  dag.Uuid,
+		Status:                   "running",
+		FailingTaskExecutionUuid: "",
+		TaskExecutions:           []TaskExecution{},
+		Start:                    time.Now(),
+		End:                      time.Now(),
+	}
+	updateDagExecution(dagExecution)
+	return dagExecution
 }
 
 func getMongoCredentials() (string, string) {
@@ -88,41 +154,10 @@ func mongoRequest(endpoint string, body []byte) []byte {
 	return body
 }
 
-func taskExecutionToJson(taskExecution TaskExecution) string {
-	json, err := json.Marshal(taskExecution)
-	if err != nil {
-		panic(err)
-	}
-	return string(json)
-}
-
-func dagExecutionToJson(dagExecution DagExecution) string {
-	json, err := json.Marshal(dagExecution)
-	if err != nil {
-		panic(err)
-	}
-	return string(json)
-}
-
-func jsonToSchedule(body []byte) (array []Dag) {
-	var schedule []Dag
-	err := json.Unmarshal(body, &schedule)
-	if err != nil {
-		panic(err)
-	}
-	return schedule
-}
-
 func getScheduleFromDB() (array []Dag) {
-	body := mongoRequest("find", []byte(`{"database":"scheduler","collection":"dags","query":{}}`))
+	body := mongoRequest("find", []byte(`{"database":"scheduler","collection":"dags","query":{"enabled":true}}`))
 	schedule := jsonToSchedule(body)
 	return schedule
-}
-
-func updateTaskExecution(taskExecution TaskExecution) {
-	database := "scheduler"
-	collection := "task_executions"
-	mongoRequest("upsert", []byte(`{"database":"`+database+`","collection":"`+collection+`","query":{"uuid":"`+taskExecution.Uuid+`"},"update":{"$set":`+taskExecutionToJson(taskExecution)+`}}`))
 }
 
 func updateDagExecution(dagExecution DagExecution) {
@@ -135,14 +170,12 @@ func updateTaskExecutionError(taskExecution TaskExecution, error string) (taskEx
 	taskExecution.Error = error
 	taskExecution.Status = "failed"
 	taskExecution.End = time.Now()
-	updateTaskExecution(taskExecution)
 	return taskExecution
 }
 
 func updateTaskExecutionSuccess(taskExecution TaskExecution) (taskExecutionUpdated TaskExecution) {
 	taskExecution.Status = "success"
 	taskExecution.End = time.Now()
-	updateTaskExecution(taskExecution)
 	return taskExecution
 }
 
@@ -153,82 +186,90 @@ func updateDagExecutionSuccess(dagExecution DagExecution) (dagExecutionUpdated D
 	return dagExecution
 }
 
-func updateDagExecutionError(dagExecution DagExecution, failingTaskExecutionUuid string) (dagExecutionUpdated DagExecution) {
-	dagExecution.Status = "failed"
-	dagExecution.End = time.Now()
-	dagExecution.FailingTaskExecutionUuid = failingTaskExecutionUuid
+func dagExecutionReplaceLastTaskExecution(dagExecution DagExecution, taskExecution TaskExecution) (dagExecutionUpdated DagExecution) {
+	dagExecution.TaskExecutions[len(dagExecution.TaskExecutions)-1] = taskExecution
+	if dagExecution.Name == "" {
+		panic("dagExecution name is empty")
+	}
 	updateDagExecution(dagExecution)
 	return dagExecution
 }
 
-func executeTask(dag Dag, task Task) (taskExecution TaskExecution) {
-	taskExecution = TaskExecution{
-		Uuid:     uuid.New().String(),
-		Name:     task.Name,
-		DagUuid:  dag.Uuid,
-		TaskUuid: task.Uuid,
-		Attempts: 1,
-		Status:   "running",
-		Start:    time.Now(),
-		End:      time.Now(),
-		Error:    "",
-	}
-	updateTaskExecution(taskExecution)
-	client := &http.Client{}
-	req, err := http.NewRequest("GET", task.Endpoint, nil)
+func updateDagExecutionError(dagExecution DagExecution, failingTaskExecution TaskExecution) (dagExecutionUpdated DagExecution) {
+	dagExecution.Status = "failed"
+	dagExecution.End = time.Now()
+	dagExecution.FailingTaskExecutionUuid = failingTaskExecution.Uuid
+	dagExecution = dagExecutionReplaceLastTaskExecution(dagExecution, failingTaskExecution)
+	updateDagExecution(dagExecution)
+	return dagExecution
+}
 
+func performHttpCall(method string, url string, headers map[string]string, body []byte) (response []byte) {
+	client := &http.Client{}
+	req, err := http.NewRequest(method, url, bytes.NewBuffer(body))
 	if err != nil {
-		return updateTaskExecutionError(taskExecution, err.Error())
+		panic(err)
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return updateTaskExecutionError(taskExecution, err.Error())
+		panic(err)
 	}
 	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
+	response, err = ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return updateTaskExecutionError(taskExecution, err.Error())
+		panic(err)
 	}
-	if resp.StatusCode != 200 {
-		return updateTaskExecutionError(taskExecution, string(body))
-	}
-	return updateTaskExecutionSuccess(taskExecution)
+	return response
 }
 
-func dagExecutionReplaceLastTaskExecution(dagExecution DagExecution, taskExecution TaskExecution) (dagExecutionUpdated DagExecution) {
-	dagExecution.TaskExecutions[len(dagExecution.TaskExecutions)-1] = taskExecution
+func executeTask(dag Dag, task Task, dagExecution DagExecution, taskExecution TaskExecution) (taskExecutionUpdated TaskExecution, dagExecutionUpdated DagExecution) {
+	if len(dagExecution.TaskExecutions) > 0 && dagExecution.TaskExecutions[len(dagExecution.TaskExecutions)-1].Uuid == taskExecution.Uuid {
+		dagExecution.TaskExecutions[len(dagExecution.TaskExecutions)-1] = taskExecution
+	} else {
+		dagExecution.TaskExecutions = append(dagExecution.TaskExecutions, taskExecution)
+	}
 	updateDagExecution(dagExecution)
-	return dagExecution
+	taskExecution.Attempts = taskExecution.Attempts + 1
+	defer func() {
+		if r := recover(); r != nil {
+			taskExecutionUpdated = updateTaskExecutionError(taskExecution, fmt.Sprintf("%s", r))
+			dagExecutionUpdated = updateDagExecutionError(dagExecution, taskExecution)
+		}
+	}()
+	performHttpCall("GET", task.Endpoint, map[string]string{"Content-Type": "application/json"}, []byte(`{}`))
+	return updateTaskExecutionSuccess(taskExecution), updateDagExecutionSuccess(dagExecution)
 }
 
 func executeDag(dag Dag) (dagExecution DagExecution) {
-	dagExecution = DagExecution{
-		Uuid:                     uuid.New().String(),
-		Name:                     dag.Name,
-		DagUuid:                  dag.Uuid,
-		Status:                   "running",
-		FailingTaskExecutionUuid: "",
-		TaskExecutions:           []TaskExecution{},
-		Start:                    time.Now(),
-		End:                      time.Now(),
-	}
+	dagExecution = getNewDagExecution(dag)
 	for _, task := range dag.Tasks {
-		dagExecution.TaskExecutions = append(dagExecution.TaskExecutions, executeTask(dag, task))
-		taskExecution := executeTask(dag, task)
-		for taskExecution.Status == "failed" && task.RetryOnFailure && taskExecution.Attempts < task.MaxRetries {
-			dagExecution = dagExecutionReplaceLastTaskExecution(dagExecution, taskExecution)
-			taskExecution = executeTask(dag, task)
+		taskExecution := getNewTaskExecution(dag, task)
+		maxRetries := task.MaxRetries
+		if task.MaxRetries > MAX_TASK_EXECUTION_RETRIES {
+			maxRetries = MAX_TASK_EXECUTION_RETRIES
+		}
+		for {
+			taskExecution, dagExecution = executeTask(dag, task, dagExecution, taskExecution)
 			if taskExecution.Status == "success" {
+				dagExecutionReplaceLastTaskExecution(dagExecution, taskExecution)
 				break
 			}
 			if taskExecution.Status == "failed" {
-				dagExecution = updateDagExecutionError(dagExecution, taskExecution.Uuid)
-				return dagExecution
-			} else {
-				panic("Unknown task status")
+				fmt.Println("Task failed", task.Name)
+				dagExecution = updateDagExecutionError(dagExecution, taskExecution)
 			}
+			if !task.RetryOnFailure || taskExecution.Attempts >= maxRetries {
+				return dagExecution
+			}
+			fmt.Println("Retrying task", task.Name)
+
 		}
-		dagExecutionReplaceLastTaskExecution(dagExecution, taskExecution)
+		if taskExecution.Status == "failed" {
+			return updateDagExecutionError(dagExecution, taskExecution)
+		}
 	}
 	return updateDagExecutionSuccess(dagExecution)
 }
@@ -241,7 +282,7 @@ func main() {
 	for _, dag := range schedule {
 		scheduler.CronWithSeconds(dag.Cron).Do(executeDag, dag)
 	}
-	master.Every(1).Seconds().Do(func() {
+	master.Every(1).Minutes().Do(func() {
 		scheduler.Clear()
 		schedule = getScheduleFromDB()
 		for _, dag := range schedule {
