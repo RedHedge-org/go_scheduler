@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-co-op/gocron"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 )
 
@@ -26,6 +27,29 @@ type Dag struct {
 	Name  string `json:"name"`
 	Cron  string `json:"cron"`
 	Tasks []Task `json:"tasks"`
+}
+
+type TaskExecution struct {
+	Uuid     string    `json:"uuid"`
+	Name     string    `json:"name"`
+	DagUuid  string    `json:"dag_uuid"`
+	TaskUuid string    `json:"task_uuid"`
+	Attempts int       `json:"attempts"`
+	Status   string    `json:"status"`
+	Start    time.Time `json:"start"`
+	End      time.Time `json:"end"`
+	Error    string    `json:"error"`
+}
+
+type DagExecution struct {
+	Uuid                     string
+	Name                     string
+	DagUuid                  string
+	Status                   string
+	FailingTaskExecutionUuid string
+	TaskExecutions           []TaskExecution
+	Start                    time.Time
+	End                      time.Time
 }
 
 func getMongoCredentials() (string, string) {
@@ -64,19 +88,20 @@ func mongoRequest(endpoint string, body []byte) []byte {
 	return body
 }
 
-func updateTaskExecution(taskExecution TaskExecution) {
-	body, err := json.Marshal(taskExecution)
+func taskExecutionToJson(taskExecution TaskExecution) string {
+	json, err := json.Marshal(taskExecution)
 	if err != nil {
 		panic(err)
 	}
-	mongoRequest("update", body)
-
+	return string(json)
 }
 
-func getScheduleFromDB() (array []Dag) {
-	body := mongoRequest("find", []byte(`{"database":"scheduler","collection":"dags","query":{}}`))
-	schedule := jsonToSchedule(body)
-	return schedule
+func dagExecutionToJson(dagExecution DagExecution) string {
+	json, err := json.Marshal(dagExecution)
+	if err != nil {
+		panic(err)
+	}
+	return string(json)
 }
 
 func jsonToSchedule(body []byte) (array []Dag) {
@@ -88,24 +113,62 @@ func jsonToSchedule(body []byte) (array []Dag) {
 	return schedule
 }
 
-type TaskExecution struct {
-	Uuid     string
-	DagUuid  string
-	TaskUuid string
-	Attempts int
-	Status   string
-	Start    time.Time
-	End      time.Time
-	Error    string
+func getScheduleFromDB() (array []Dag) {
+	body := mongoRequest("find", []byte(`{"database":"scheduler","collection":"dags","query":{}}`))
+	schedule := jsonToSchedule(body)
+	return schedule
+}
+
+func updateTaskExecution(taskExecution TaskExecution) {
+	database := "scheduler"
+	collection := "task_executions"
+	mongoRequest("upsert", []byte(`{"database":"`+database+`","collection":"`+collection+`","query":{"uuid":"`+taskExecution.Uuid+`"},"update":{"$set":`+taskExecutionToJson(taskExecution)+`}}`))
+}
+
+func updateDagExecution(dagExecution DagExecution) {
+	database := "scheduler"
+	collection := "dag_executions"
+	mongoRequest("upsert", []byte(`{"database":"`+database+`","collection":"`+collection+`","query":{"uuid":"`+dagExecution.Uuid+`"},"update":{"$set":`+dagExecutionToJson(dagExecution)+`}}`))
+}
+
+func updateTaskExecutionError(taskExecution TaskExecution, error string) (taskExecutionUpdated TaskExecution) {
+	taskExecution.Error = error
+	taskExecution.Status = "failed"
+	taskExecution.End = time.Now()
+	updateTaskExecution(taskExecution)
+	return taskExecution
+}
+
+func updateTaskExecutionSuccess(taskExecution TaskExecution) (taskExecutionUpdated TaskExecution) {
+	taskExecution.Status = "success"
+	taskExecution.End = time.Now()
+	updateTaskExecution(taskExecution)
+	return taskExecution
+}
+
+func updateDagExecutionSuccess(dagExecution DagExecution) (dagExecutionUpdated DagExecution) {
+	dagExecution.Status = "success"
+	dagExecution.End = time.Now()
+	updateDagExecution(dagExecution)
+	return dagExecution
+}
+
+func updateDagExecutionError(dagExecution DagExecution, failingTaskExecutionUuid string) (dagExecutionUpdated DagExecution) {
+	dagExecution.Status = "failed"
+	dagExecution.End = time.Now()
+	dagExecution.FailingTaskExecutionUuid = failingTaskExecutionUuid
+	updateDagExecution(dagExecution)
+	return dagExecution
 }
 
 func executeTask(dag Dag, task Task) (taskExecution TaskExecution) {
 	taskExecution = TaskExecution{
-		Uuid:     "uuid",
+		Uuid:     uuid.New().String(),
+		Name:     task.Name,
 		DagUuid:  dag.Uuid,
 		TaskUuid: task.Uuid,
 		Attempts: 1,
-		Status:   "success",
+		Status:   "running",
 		Start:    time.Now(),
 		End:      time.Now(),
 		Error:    "",
@@ -113,62 +176,61 @@ func executeTask(dag Dag, task Task) (taskExecution TaskExecution) {
 	updateTaskExecution(taskExecution)
 	client := &http.Client{}
 	req, err := http.NewRequest("GET", task.Endpoint, nil)
+
 	if err != nil {
-		taskExecution.Status = "failed"
-		taskExecution.End = time.Now()
-		taskExecution.Error = err.Error()
-		updateTaskExecution(taskExecution)
-		return
+		return updateTaskExecutionError(taskExecution, err.Error())
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		taskExecution.Status = "failed"
-		taskExecution.End = time.Now()
-		taskExecution.Error = err.Error()
-		updateTaskExecution(taskExecution)
-		return
+		return updateTaskExecutionError(taskExecution, err.Error())
 	}
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		taskExecution.Status = "failed"
-		taskExecution.End = time.Now()
-		taskExecution.Error = err.Error()
-		updateTaskExecution(taskExecution)
-		return
+		return updateTaskExecutionError(taskExecution, err.Error())
 	}
 	if resp.StatusCode != 200 {
-		taskExecution.Status = "failed"
-		taskExecution.End = time.Now()
-		taskExecution.Error = string(body)
-		updateTaskExecution(taskExecution)
-		return
+		return updateTaskExecutionError(taskExecution, string(body))
 	}
-	taskExecution.Status = "success"
-	taskExecution.End = time.Now()
-	updateTaskExecution(taskExecution)
-	return taskExecution
+	return updateTaskExecutionSuccess(taskExecution)
 }
 
-func executeDag(dag Dag) {
-	fmt.Println("Executing dag: ", dag.Name)
+func dagExecutionReplaceLastTaskExecution(dagExecution DagExecution, taskExecution TaskExecution) (dagExecutionUpdated DagExecution) {
+	dagExecution.TaskExecutions[len(dagExecution.TaskExecutions)-1] = taskExecution
+	updateDagExecution(dagExecution)
+	return dagExecution
+}
+
+func executeDag(dag Dag) (dagExecution DagExecution) {
+	dagExecution = DagExecution{
+		Uuid:                     uuid.New().String(),
+		Name:                     dag.Name,
+		DagUuid:                  dag.Uuid,
+		Status:                   "running",
+		FailingTaskExecutionUuid: "",
+		TaskExecutions:           []TaskExecution{},
+		Start:                    time.Now(),
+		End:                      time.Now(),
+	}
 	for _, task := range dag.Tasks {
-		fmt.Println("	", task.Name)
+		dagExecution.TaskExecutions = append(dagExecution.TaskExecutions, executeTask(dag, task))
 		taskExecution := executeTask(dag, task)
 		for taskExecution.Status == "failed" && task.RetryOnFailure && taskExecution.Attempts < task.MaxRetries {
-			fmt.Println("	Retrying task: ", task.Name)
+			dagExecution = dagExecutionReplaceLastTaskExecution(dagExecution, taskExecution)
 			taskExecution = executeTask(dag, task)
 			if taskExecution.Status == "success" {
 				break
 			}
+			if taskExecution.Status == "failed" {
+				dagExecution = updateDagExecutionError(dagExecution, taskExecution.Uuid)
+				return dagExecution
+			} else {
+				panic("Unknown task status")
+			}
 		}
-		if taskExecution.Status == "failed" {
-			fmt.Println("Task failed: ", task.Name)
-			fmt.Println("Error: ", taskExecution.Error)
-			break
-		}
+		dagExecutionReplaceLastTaskExecution(dagExecution, taskExecution)
 	}
-
+	return updateDagExecutionSuccess(dagExecution)
 }
 
 func main() {
