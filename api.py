@@ -1,5 +1,6 @@
 import sanic
 import time
+import random
 
 app = sanic.Sanic(name="test")
 
@@ -16,7 +17,6 @@ def test(request):
     time_diff = time.time() - last_calls["test_1"]
     last_calls["test_1"] = time.time()
     print("test_1", time_diff)
-
     return sanic.response.json({"test": "ok"})
 
 
@@ -25,7 +25,9 @@ def test(request):
     time_diff = time.time() - last_calls["test_2"]
     print("test_2", time_diff)
     last_calls["test_2"] = time.time()
-    return sanic.response.json({"test": "ok"})
+    return sanic.response.json(
+        {"test": "ok"}, status=random.choice([200, 200, 200, 200, 200, 404, 500])
+    )
 
 
 @app.route("/test_3")

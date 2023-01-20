@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/go-co-op/gocron"
@@ -33,15 +34,15 @@ type Dag struct {
 }
 
 type TaskExecution struct {
-	Uuid     string    `json:"uuid"`
-	Name     string    `json:"name"`
-	DagUuid  string    `json:"dag_uuid"`
-	TaskUuid string    `json:"task_uuid"`
-	Attempts int       `json:"attempts"`
-	Status   string    `json:"status"`
-	Start    time.Time `json:"start"`
-	End      time.Time `json:"end"`
-	Error    string    `json:"error"`
+	Uuid     string `json:"uuid"`
+	Name     string `json:"name"`
+	DagUuid  string `json:"dag_uuid"`
+	TaskUuid string `json:"task_uuid"`
+	Attempts int    `json:"attempts"`
+	Status   string `json:"status"`
+	Start    int64  `json:"start"`
+	End      int64  `json:"end"`
+	Error    string `json:"error"`
 }
 
 type DagExecution struct {
@@ -51,8 +52,8 @@ type DagExecution struct {
 	Status                   string          `json:"status"`
 	FailingTaskExecutionUuid string          `json:"failing_task_execution_uuid"`
 	TaskExecutions           []TaskExecution `json:"task_executions"`
-	Start                    time.Time       `json:"start"`
-	End                      time.Time       `json:"end"`
+	Start                    int64           `json:"start"`
+	End                      int64           `json:"end"`
 }
 
 func taskExecutionToJson(taskExecution TaskExecution) string {
@@ -96,9 +97,10 @@ func getNewTaskExecution(dag Dag, task Task) (taskExecution TaskExecution) {
 		TaskUuid: task.Uuid,
 		Attempts: 0,
 		Status:   "running",
-		Start:    time.Now(),
-		End:      time.Now(),
-		Error:    "",
+		// start and end should be unix timestamps
+		Start: time.Now().Unix(),
+		End:   time.Now().Unix(),
+		Error: "",
 	}
 	return taskExecution
 }
@@ -111,8 +113,8 @@ func getNewDagExecution(dag Dag) (dagExecution DagExecution) {
 		Status:                   "running",
 		FailingTaskExecutionUuid: "",
 		TaskExecutions:           []TaskExecution{},
-		Start:                    time.Now(),
-		End:                      time.Now(),
+		Start:                    time.Now().Unix(),
+		End:                      time.Now().Unix(),
 	}
 	updateDagExecution(dagExecution)
 	return dagExecution
@@ -169,19 +171,19 @@ func updateDagExecution(dagExecution DagExecution) {
 func updateTaskExecutionError(taskExecution TaskExecution, error string) (taskExecutionUpdated TaskExecution) {
 	taskExecution.Error = error
 	taskExecution.Status = "failed"
-	taskExecution.End = time.Now()
+	taskExecution.End = time.Now().Unix()
 	return taskExecution
 }
 
 func updateTaskExecutionSuccess(taskExecution TaskExecution) (taskExecutionUpdated TaskExecution) {
 	taskExecution.Status = "success"
-	taskExecution.End = time.Now()
+	taskExecution.End = time.Now().Unix()
 	return taskExecution
 }
 
 func updateDagExecutionSuccess(dagExecution DagExecution) (dagExecutionUpdated DagExecution) {
 	dagExecution.Status = "success"
-	dagExecution.End = time.Now()
+	dagExecution.End = time.Now().Unix()
 	updateDagExecution(dagExecution)
 	return dagExecution
 }
@@ -197,7 +199,7 @@ func dagExecutionReplaceLastTaskExecution(dagExecution DagExecution, taskExecuti
 
 func updateDagExecutionError(dagExecution DagExecution, failingTaskExecution TaskExecution) (dagExecutionUpdated DagExecution) {
 	dagExecution.Status = "failed"
-	dagExecution.End = time.Now()
+	dagExecution.End = time.Now().Unix()
 	dagExecution.FailingTaskExecutionUuid = failingTaskExecution.Uuid
 	dagExecution = dagExecutionReplaceLastTaskExecution(dagExecution, failingTaskExecution)
 	updateDagExecution(dagExecution)
@@ -216,6 +218,9 @@ func performHttpCall(method string, url string, headers map[string]string, body 
 	resp, err := client.Do(req)
 	if err != nil {
 		panic(err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		panic("http call failed with status code " + strconv.Itoa(resp.StatusCode))
 	}
 	defer resp.Body.Close()
 	response, err = ioutil.ReadAll(resp.Body)
@@ -240,7 +245,7 @@ func executeTask(dag Dag, task Task, dagExecution DagExecution, taskExecution Ta
 		}
 	}()
 	performHttpCall("GET", task.Endpoint, map[string]string{"Content-Type": "application/json"}, []byte(`{}`))
-	return updateTaskExecutionSuccess(taskExecution), updateDagExecutionSuccess(dagExecution)
+	return updateTaskExecutionSuccess(taskExecution), dagExecution
 }
 
 func executeDag(dag Dag) (dagExecution DagExecution) {
@@ -282,7 +287,7 @@ func main() {
 	for _, dag := range schedule {
 		scheduler.CronWithSeconds(dag.Cron).Do(executeDag, dag)
 	}
-	master.Every(1).Minutes().Do(func() {
+	master.Every(1).Seconds().Do(func() {
 		scheduler.Clear()
 		schedule = getScheduleFromDB()
 		for _, dag := range schedule {
