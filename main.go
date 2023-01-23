@@ -97,10 +97,9 @@ func getNewTaskExecution(dag Dag, task Task) (taskExecution TaskExecution) {
 		TaskUuid: task.Uuid,
 		Attempts: 0,
 		Status:   "running",
-		// start and end should be unix timestamps
-		Start: time.Now().Unix(),
-		End:   time.Now().Unix(),
-		Error: "",
+		Start:    time.Now().Unix(),
+		End:      time.Now().Unix(),
+		Error:    "",
 	}
 	return taskExecution
 }
@@ -121,9 +120,11 @@ func getNewDagExecution(dag Dag) (dagExecution DagExecution) {
 }
 
 func getMongoCredentials() (string, string) {
-	err := godotenv.Load()
-	if err != nil {
-		panic(err)
+	if os.Getenv("MONGO_API_ENDPOINT") == "" {
+		err := godotenv.Load()
+		if err != nil {
+			panic(err)
+		}
 	}
 	mongoAPIEndpoint, mongoAPIKey := os.Getenv("MONGO_API_ENDPOINT"), os.Getenv("MONGO_API_KEY")
 	if mongoAPIEndpoint == "" {
